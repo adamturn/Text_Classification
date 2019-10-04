@@ -69,14 +69,19 @@ t_df = pd.DataFrame.from_records(t_df, columns=colnames)
 ## export (this handles desc containing ',' by wrapping the entire desc in quotes)
 t_df.to_csv("C:\\Users\\Admin\\Documents\\data\\text_classification.csv")
 
-## train(70) test(30) split
+## train(70), test(30) split
 t_df_train = pd.DataFrame()
 sample_size = 3500
 
 for i in t_hs:
     pram = "hs == \'" + i + "\'"
-    #print(pram)
     t_df_train = t_df_train.append(t_df.query(pram).sample(n=sample_size))
     print(t_df_train)
 
-## test (30)
+t_df_test = t_df[~t_df.isin(t_df_train)].dropna(how='all')
+
+train_y = t_df_train['hs']
+train_x = t_df_train.drop(columns=['desc_id', 'hs'])
+
+test_y = t_df_test['hs']
+test_x = t_df_test.drop(columns=['desc_id', 'hs'])
