@@ -1,27 +1,19 @@
-# adam note: '##' used for testing in pycharm
 ##
 # built-in
 from time import process_time
 # local
+import conndb
 from cnb_dev import MasterDataFrame
 from cnb_dev import MasterModel
 # external
-import psycopg2
 import pandas as pd
 from joblib import load
+print('Imports complete.')
 
-print("Establishing connection with database...")
-conn = psycopg2.connect(
-    host="xxx-xx-xxx-xxx-xx.compute-1.amazonaws.com",
-    database="db",
-    port=5432,
-    user="usr",
-    password="pw"
-)
-cur = conn.cursor()
-print(">Connection established.")
+# --- connect to dev db ---
+cur = conndb.connect_db()
+# -------------------------
 
-##
 print("[USER INPUT] Please provide the full path to a joblib file containing the model.")
 model_path = input()
 # loading in the MasterModel.models dictionary. Documentation should be available with help().
@@ -32,7 +24,6 @@ model.models = load(model_path)
 print(">Hash table loaded as: model.models")
 print("--- Loading time: " + str((process_time() - start_time)) + " seconds ---")
 
-##
 # choosing data to classify
 MASTER_GATE = 'open'
 while MASTER_GATE != 'exit':
@@ -41,9 +32,9 @@ while MASTER_GATE != 'exit':
     query = '''
         drop table if exists t_df;
         create temp table t_df(
-            description_id varchar,
-            description varchar,
-            port_origin varchar,
+            description_id varchar,  
+            description varchar, 
+            port_origin varchar, 
             port_us varchar,
             shipper varchar,
             consignee varchar
@@ -67,7 +58,7 @@ while MASTER_GATE != 'exit':
             for i in range(len(sql)):
                 if sql[i] in keywords:
                     sql[i] = '\n' + sql[i]
-            return print(" ".join(sql))
+            return " ".join(sql)
 
         print(">Does this look correct?\n", sql_format(query))
         print("[USER INPUT] Y/N")
@@ -87,9 +78,10 @@ while MASTER_GATE != 'exit':
     print(">Query result stored in instance of MasterDataFrame: df.master\n")
 
     # PREDICTION
-    X_TFIDF = model.live_prediction(df)  # method operates in the background, returns x_tfidf_level0
+    # important to pass df.master or equivalent here such that is receives a pd.DataFrame object
+    X_TFIDF = model.live_prediction(df.master)  # method operates in the background, returns x_tfidf_level0
     print("Preview of results: \n")
-    print(df.master[['desc_id', 'desc_plus', 'hs4pred']])
+    print(df.master[['desc_id', 'desc_cat', 'hs4pred']])
     print("\n")
 
     REDIRECT_OPTIONS = ['exit', 'classify', 'export']
