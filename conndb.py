@@ -18,11 +18,10 @@ def parse_props(props_path):
 
 
 def connect_db(props_path):
-    """Attempts to connect to db.
+    """Connects to db and returns psycopg2 cursor object.
+
     Args:
         props_path: path to Java properties file.
-
-    Returns: psycopg2 cursor object
     """
     props = parse_props(props_path)
     print("Connecting to db...")
