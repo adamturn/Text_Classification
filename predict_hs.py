@@ -16,7 +16,7 @@ cur = conndb.connect_db()
 
 print("[USER INPUT] Please provide the full path to a joblib file containing the model.")
 model_path = input()
-# loading in the MasterModel.models dictionary. Documentation should be available with help().
+# loading in the MasterModel.models dictionary. Documentation is available with help().
 print(">Loading model from specified directory...")
 start_time = process_time()
 model = MasterModel()
