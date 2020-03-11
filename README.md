@@ -4,4 +4,4 @@
 ##### *\*https://scikit-learn.org/stable/modules/generated/sklearn.naive_bayes.ComplementNB.html*
 ##### *\*\*Rennie et al. (2003) https://people.csail.mit.edu/jrennie/papers/icml03-nb.pdf*
 ### predict_hs.py provides a user-friendly interface for the application of an exported model from cnb_dev.py to live data through a SQL query.
-### sklearn_mod.py adds a bit of extra functionality to all classes that inherit from the _BaseNB() class in the sklearn.naive_bayes module.
+### sklearn_mod.py adds a bit of extra functionality to anything that inherits from the _BaseNB() class in the sklearn.naive_bayes module.
