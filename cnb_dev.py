@@ -1,6 +1,8 @@
 # Python 3.6.8
-# adam note: '##' used for testing in pycharm
+# adam note:
+#   '##' used for testing in pycharm
 ##
+
 # standard library
 import math
 import re
@@ -10,7 +12,7 @@ import pandas as pd
 from joblib import dump
 from sklearn.model_selection import StratifiedKFold
 from sklearn.feature_extraction.text import TfidfVectorizer
-# with naive_bayes_mod, predict(return_n=3) returns tuple(top1, [top3, top2, top1])
+# with custom naive_bayes modification, predict(return_n=3) method returns tuple(top1, [top3, top2, top1])
 from sklearn.naive_bayes_mod import ComplementNB
 # from sklearn.naive_bayes import ComplementNB
 from sklearn.metrics import accuracy_score
