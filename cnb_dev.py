@@ -1,12 +1,10 @@
 # Python 3.6.8
 # adam note: '##' used for testing in pycharm
 ##
-# built-in
+# standard library
 import math
 import re
-# local
-import conndb
-# external
+# third-party
 import numpy as np
 import pandas as pd
 from joblib import dump
@@ -16,6 +14,8 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.naive_bayes_mod import ComplementNB
 # from sklearn.naive_bayes import ComplementNB
 from sklearn.metrics import accuracy_score
+# first-party
+import conndb
 
 # --- set global vars ---
 SAMPLE_PCT = 0.50
@@ -27,7 +27,7 @@ cur = conndb.connect_db()
 # -------------------------
 
 
-class MasterHS:
+class MasterHS(object):
     """Initialize with MasterHS.construct()."""
 
     def __init__(self, counts):
@@ -79,7 +79,7 @@ class MasterHS:
         self.hs2counts = hs2counts.sort_values('weight', ascending=False)
 
 
-class MasterDataFrame:
+class MasterDataFrame(object):
     """Initialize with MasterDataFrame.construct(MasterHS.counts)."""
     
     def __init__(self, dataframe):
@@ -251,7 +251,7 @@ class MasterDataFrame:
         self.test['c_hat_code'] = c_hat_codes
 
 
-class MasterModel:
+class MasterModel(object):
     def __init__(self):
         """Holds all of the classifiers, their results, and related methods.
 
