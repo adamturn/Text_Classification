@@ -1,5 +1,5 @@
 # Text Classification
-## Developed on CentOS. Yum! (RH, if you’re reading this, I use Fedora on my laptop and I love it pls hire me)
+## Developed on CentOS. Yum!
 ### cnb_dev.py is a sandbox to train and test ~~text classification models~~ multilayer Bayesian networks that can predict Harmonized Tariff Scheduling (HTS/HS) codes by analyzing containerized cargo description data. After basic natural language processing, data is passed to the root node where it is vectorized and used to train a slightly modified version of scikit-learn's implementation* of a Complement Naive Bayes (CNB) classifier**. The data is then partitioned on the predicted values and branched into the first layer of child nodes (each containing another TF-IDF vectorizer, CNB classifier pair). This branching process occurs once more before final predictions are aggregated based on original index values. As we descend further into the tree, the CNB classifiers predict decreasingly general characteristics before they settle on the top 3 4-digit HS codes for each container description.
 ##### *\*https://scikit-learn.org/stable/modules/generated/sklearn.naive_bayes.ComplementNB.html*
 ##### *\*\*Rennie et al. (2003) https://people.csail.mit.edu/jrennie/papers/icml03-nb.pdf*
