@@ -1,18 +1,16 @@
+#!/usr/bin/python3
 # Python 3.6.8
 
-# adam note:
-#     check path to properties file
-
-# debug
-import pdb
 # standard library
 import re
 import math
+import random
 from time import process_time
 # third-party
+import joblib
 import psycopg2
+import numpy as np
 import pandas as pd
-from joblib import dump
 from sklearn.metrics import accuracy_score
 from sklearn.feature_extraction.text import TfidfVectorizer
 # third-party modified
@@ -20,24 +18,12 @@ from sklearn.naive_bayes_mod import ComplementNB
 # first-party
 import conndb
 
-
-class DBInterface(object):
-    """Base class that interfaces with the db.
-
-    Attributes:
-        con (psycopg2 connection object): establishes connection with the db
-        cur (psycopg2 cursor object): interacts with the db
-    """
-    def __init__(self, connection, ss_cursor):
-        """
-        Args:
-            connection (psycopg2 cursor object): passed from derived class constructor
-        """
-        self.con = connection
-        self.cur = connection.cursor(ss_cursor)
+# adam note:
+#     check path to properties file
+STRFMT0 = " "*2 + "> "
 
 
-class LiveData(DBInterface):
+class LiveData(object):
     """Derived class that holds live data from the db.
 
     Attributes:
@@ -48,37 +34,46 @@ class LiveData(DBInterface):
         counts (pd.Series): series with code along the axis and counts as values
     """
 
-    def __init__(self, connection, ss_cursor):
-        """Initialize with LiveData.construct() class method.
-
-        Args:
-            connection (psycopg2 connection object): passed from LiveData.connect() class method
-        """
-        super().__init__(connection, ss_cursor)
+    def __init__(self):
+        propspath = "/path/to/config_file"
+        self.con = conndb.create_connection(propspath)
         self.og = None
         self.df = None
         self.train = None
         self.test = None
         self.counts = None
 
-    @classmethod
-    def connect(cls, cursor_name=None):
-        """Connects to the db and returns a connected LiveData object."""
-        props = conndb.parse_props("/home/config_files/config_dev.properties")
+    @staticmethod
+    def create_records(cursor, batch_size):
+        print(f"{STRFMT0}Fetching data records...")
+        start_time = process_time()
+        data_records = list()
+        data_records.extend(cursor.fetchmany(batch_size))
+        while data_records:
+            batch = cursor.fetchmany(batch_size)
+            if batch:
+                data_records.extend(batch)
+            else:
+                break
+        print(f"{STRFMT0}Fetch time:", process_time() - start_time)
 
-        print("Connecting to db...")
-        conn = psycopg2.connect(
-            host=props['db_host'],
-            database=props['db_name'],
-            port=props['db_port'],
-            user=props['db_user'],
-            password=props['db_password']
-        )
-        print("{}> Connection established!".format(' ' * 2))
+        return data_records
 
-        return cls(connection=conn, ss_cursor=cursor_name)
+    def __backup_og(self, data_records, filepath, colnames):
+        """Creates original data atrribute and writes itself to disk.
 
-    def compute_totals(self, pandas_df, partition_on="hs4"):
+        Args:
+            data_records (list[tuple]): holds data from db
+            filepath (str): where to save the original data
+            colnames (list[str]): column names for the original data
+        """
+        self.og = pd.DataFrame.from_records(data_records, columns=colnames)
+        print(self.og)
+        print("Writing data to csv at:\n", filepath)
+        self.og.to_csv(filepath, index=False)
+        return self
+
+    def __compute_totals(self, pandas_df, partition_on="hs4"):
         """Counts the total number of observations per element of the set that is partitioned on.
 
         Args:
@@ -86,35 +81,62 @@ class LiveData(DBInterface):
             partition_on (str): column name used as index for count
         """
         # returns pd.Series having counts as values with hs4 codes as index
-        print("Computing totals...")
+        start_time = process_time()
         self.counts = pandas_df[partition_on].value_counts(
             normalize=False, sort=True, ascending=False, bins=None, dropna=True
         )
+        print(f"{STRFMT0}Shape: {self.df.shape}")
+        print(f"{STRFMT0}Compute totals speed:", process_time() - start_time)
         return self
 
-    def query_latest_data(self, totalobs, override=False):
-        """Query the db and get live data. Work in Progress."""
-        print("Querying the latest data...")
-        if not override:
-            query = """
-                select record_date, description_id, description, fulltext_description, port_us, port_origin, shipper, consignee
-                from cbp.imports_combined
-                order by record_date desc
-                limit {}
-                ;
-            """.format(totalobs)
-            self.cur.execute(query)
-        # TODO: not sure the best way to implement this
-        else:
-            query = str(override)
-            print(query)
-            self.cur.close()
-            self.con.close()
+    def __dump_record_id(self, filepath):
+        print("Fetching max record id...")
+        client_cursor = self.con.cursor()
+        query = "select max(record_id) from cbp.import_full;"
+        client_cursor.execute(query)
+        latest_record_id = client_cursor.fetchall()
+        print(f"{STRFMT0}Latest:", latest_record_id)
+        print(f"{STRFMT0}Dumping to {filepath}...")
+        joblib.dump(latest_record_id, filepath, compress=0)
+        print(f"{STRFMT0}Done.")
+        return self
 
-        colnames = ["date", "desc_id", "desc", "desc_ft", "port_us", "port_og", "ship", "cons"]
-        self.og = pd.DataFrame.from_records(self.cur.fetchall(), columns=colnames)
-        self.cur.close()
-        self.con.close()
+    def query_latest_data(self, limit=True, min_record_id=False):
+        """Query the db and get live data. Work in Progress."""
+        # get the min record id
+        record_id_path = "/home/adam/text_class/project_cache/latest_id.joblib"
+        if not min_record_id:
+            try:
+                min_record_id = joblib.load(record_id_path)
+            except FileNotFoundError as e:
+                print(f"{e} -- The local directory '/project_cache' might not exist.")
+
+        # get the data
+        print("Server cursor opened!")
+        ss_cursor = self.con.cursor("cnb_create_records")
+        print(f"{STRFMT0}Querying the latest data...")
+        query = "select record_id::text, " \
+                "description_id::text, " \
+                "description::text, " \
+                "fulltext_description::text, " \
+                "port_us::text, " \
+                "port_origin::text, " \
+                "shipper::text, " \
+                "consignee::text " \
+                "from cbp.import_full " \
+                f"where record_id > {min_record_id}"
+        if limit:
+            query += f" limit 100;"
+        else:
+            query += ";"
+        ss_cursor.execute(query)
+        data_records = LiveData.create_records(cursor=ss_cursor, batch_size=100_000)
+        ss_cursor.close()
+        print(f"{STRFMT0}Server cursor closed!")
+        colnames = ["id", "desc_id", "desc", "ftdesc", "port_us", "port_og", "ship", "cons"]
+        datapath = "/home/adam/pycharm_remote/branches/latestdata.csv"
+        self.__dump_record_id(record_id_path)
+        self.__backup_og(data_records, datapath, colnames)
         return self
 
     def build_sampling_table(self, sample_pct=0.10):
@@ -123,61 +145,51 @@ class LiveData(DBInterface):
         Args:
             sample_pct (float) = percent of latest obs to sample for each hs4 code
         """
-        # gets a np.array (str) with all identified hs4 codes & corresponding counts
-        query = """
-            select hs, count(hs) as hs_count
-            from dev.zad_hs_results
-            group by hs
-            ;
-        """
-        self.cur.execute(query)
-        hs4_code_counts = self.cur.fetchall()
-        # create temporary dataframe table in Postgres
-        query = """
-            drop table if exists dev.zad_construct_sample;
-                create table dev.zad_construct_sample as (
-                    select *
-                    from dev.zad_construct_full
-                    limit 0
-                )
-            ;
-        """
-        self.cur.execute(query)
-        # loop through each hs4 code & sample a percentage
-        # of its latest total observations from dev.zad_construct_full.
-        print("Sampling from the db...")
-        sql_payload = list()
-        for hs4_code_count in hs4_code_counts:
-            total_sample_obs = math.ceil(sample_pct * int(hs4_code_count[1]))
-            # query = """
-            #     insert into dev.zad_construct_sample
-            #         select *
-            #         from dev.zad_construct_full
-            #         where hs = \'{hs4_code}\'
-            #         limit {sample_obs}
-            #     ;
-            # """.format(hs4_code=hs4_code_count[0], sample_obs=total_sample_obs)
-            query = "insert into dev.zad_construct_sample select * from dev.zad_construct_full " + \
-                    "where hs = \'{hs4}\' limit {sample_obs};".format(
-                        hs4=hs4_code_count[0], sample_obs=total_sample_obs
-                    )
-            sql_payload.append(query)
-        sql_payload = " ".join(sql_payload)
-        sql_payload += " select * from dev.zad_construct_sample;"
-        print("Executing sql payload...")
-        self.cur.execute(sql_payload)
-        self.con.commit()
-        # get the results back as original data attribute
-        colnames = ["date", "desc_id", "desc", "desc_ft", "port_us", "port_og", "ship", "cons", "hs4"]
-        self.og = pd.DataFrame.from_records(self.cur.fetchall(), columns=colnames)
-        print("Data constructed from stratified sample.")
-        self.cur.close()
-        self.con.close()
-        return self
+        client_cur = self.con.cursor()
+        print("Created client cursor.")
 
-    def sample_from_db(self):
-        print("Sampling from the db...")
-        query = "select record_date::text, " \
+        print(f"{STRFMT0}Getting HS4 counts...")
+        query = "select hs, count(hs) as hs_count " \
+                "from dev.zad_hs_results " \
+                "group by hs " \
+                ";"
+        client_cur.execute(query)
+        hs4_code_counts = pd.DataFrame(client_cur.fetchall(), columns=["hs4", "count"])
+        # drop all hs4 codes that don't have at least 4 observations
+        low_volume = hs4_code_counts[hs4_code_counts["count"] < 4]
+        print(f"{STRFMT0}Removing low volume HS4 codes...", low_volume["hs4"])
+        hs4_code_counts = hs4_code_counts[hs4_code_counts["count"] >= 4]
+        # worry about that later
+        hs4_code_counts = hs4_code_counts.to_records(index=False)
+        print(f"{STRFMT0}Initializing sampling table...")
+        query = "drop table if exists dev.zad_construct_sample; " \
+                "create table dev.zad_construct_sample as (" \
+                "select * from dev.zad_construct_full limit 0" \
+                ");"
+        client_cur.execute(query)
+
+        print(f"{STRFMT0}Building...")
+        start_time = process_time()
+        sql_payload = str()
+        for hs4_code_count in hs4_code_counts:
+            total_sample_obs = math.floor(int(hs4_code_count[1]) * sample_pct)
+            query = "insert into dev.zad_construct_sample (" \
+                    "select * from dev.zad_construct_full " \
+                    f"where hs = \'{hs4_code_count[0]}\' " \
+                    f"limit {total_sample_obs}" \
+                    "); "
+            sql_payload += query
+        client_cur.execute(sql_payload)
+        print(f"{STRFMT0}Done in {process_time() - start_time}!")
+        client_cur.close()
+        print(f"{STRFMT0}Client cursor closed!")
+
+        ss_cursor_name = "cnb_build_sampling_table"
+        ss_cursor = self.con.cursor(ss_cursor_name)
+        print("Server cursor opened!")
+        print(f"{STRFMT0}Executing...")
+        start_time = process_time()
+        query = "select record_id::text, " \
                 "description_id::text, " \
                 "description::text, " \
                 "fulltext_description::text, " \
@@ -188,56 +200,85 @@ class LiveData(DBInterface):
                 "hs::text " \
                 "from dev.zad_construct_sample" \
                 ";"
-        self.cur.execute(query)
-        # get the results back as original data attribute
-        print("{}> Creating data records".format(" "*2))
-        start_time = process_time()
-
-        data_records = list()
-        batch_size = 100_000
-        data_records.extend(self.cur.fetchmany(batch_size))
-        while data_records:
-            batch = self.cur.fetchmany(batch_size)
-            if batch:
-                data_records.extend(batch)
-            else:
-                break
-
-        print("{}> Fetch time:".format(" "*2), process_time() - start_time)
-        colnames = ["date", "desc_id", "desc", "desc_ft", "port_us", "port_og", "ship", "cons", "hs4"]
-        self.og = pd.DataFrame.from_records(data_records, columns=colnames)
-        print(self.og.head(10))
-        pdb.set_trace()
-        print("Successful pull from sampling table.")
+        ss_cursor.execute(query)
+        print(f"{STRFMT0}Server cursor execute time:", process_time() - start_time)
+                
+        data_records = LiveData.create_records(cursor=ss_cursor, batch_size=100_000)
+        ss_cursor.close()
+        print(f"{STRFMT0}Server cursor closed!")
+        self.con.commit()
+        print("LiveData connection commit!")
+        self.con.close()
+        print("LiveData connection closed!")
+        colnames = ["id", "desc_id", "desc", "ftdesc", "port_us", "port_og", "ship", "cons", "hs4"]
+        datapath = "/home/adam/pycharm_remote/branches/livedata.csv"
+        self.__backup_og(data_records, datapath, colnames)
         return self
 
-    def clean(self):
-        """Auto clean method that performs all common wrangling methods.
+    def read_csv(self, filepath):
+        """Reads old LiveData.og from disk."""
+        print("Reading live data...")
+        start_time = process_time()
+        # dtypes are all str but ship/cons sometimes have NaN
+        og = pd.read_csv(filepath, dtype=str)
+        # make NaN 'empty' str for later
+        og = og.replace(np.nan, 'empty', regex=True)
+        self.og = og
+        print(f"{STRFMT0}Read time:", process_time() - start_time)
+        return self
+
+    def clean_for_training(self):
+        """Cleaning method that performs all common wrangling methods on training data.
 
         Returns modified self.df attribute equal to a clean dataframe for experimentation.
         """
-        self.df = Wrangler.clean_raw_text(self.og)
+        print("Cleaning data...")
+
+        print(f"{STRFMT0}Replacing nans...")
+        self.df = self.og.replace(np.nan, "empty", regex=True)
+
+        print(f"{STRFMT0}Dropping duplicates...")
+        self.df.drop_duplicates(subset=["desc", "ship", "cons"], keep='last', inplace=True)
+
+        # drop all hs4 codes with less than 4 observations
+        self.__compute_totals(pandas_df=self.df, partition_on="hs4")
+        low_vol = list(self.counts[self.counts < 4].index)
+        print(f"{STRFMT0}Low volume:\n\n", pd.Series(low_vol))
+        self.df = self.df[~self.df["hs4"].isin(low_vol)]
+
+        # let Wrangler do the heavy lifting
+        self.df = Wrangler.format_raw_text(self.df)
+        self.df = Wrangler.crack_hs_code(self.df)
+        self.df = self.df[["id", "desc+", "ftdesc+", "hs4", "hs2", "hs1"]]
+
         return self
 
-    def stratified_train_test_split(self, train_pct=0.70):
-        """Creates training and testing subsets based on a stratified random sample.
 
-        Args:
-            train_pct (float): percent of sampled obs to use for training
-        """
-        self.compute_totals(pandas_df=self.df, partition_on="hs4")
+    def strat_train_test2(self, train_pct=0.70, seed=42):
+        print("StratTrainTest2 executing momentarily!")
+        random.seed(seed)
+        self.__compute_totals(pandas_df=self.df, partition_on="hs4")
+
+        start_time = process_time()
 
         training_indices = list()
         for hs4 in set(self.df["hs4"]):
-            total_training_obs = self.counts[hs4] * train_pct
-            subset_indices = list(
-                self.df.query("hs4 == " + hs4).sample(n=total_training_obs, random_state=None).index
+            total_training_obs = math.floor(self.counts[hs4] * train_pct)
+            subset_indices = random.sample(
+                population=self.df["hs4"].index[self.df["hs4"] == hs4].tolist(),
+                k=total_training_obs
             )
-            training_indices.append(subset_indices)
-        training_indices.sort(key=None, reverse=False)
+            training_indices.extend(subset_indices)
 
-        self.train = self.df.iloc[training_indices]
-        self.test = self.df[~self.df.isin(self.train)].dropna(how="all")
+        self.train = self.df.loc[training_indices]
+        df_idx = self.df.index
+        training_indices = set(training_indices)
+        testing_indices = [idx for idx in df_idx if idx not in training_indices]
+        self.test = self.df.loc[testing_indices]
+        # self.test = self.df[~self.df.isin(self.train)].dropna(how="all")
+        print(f"{STRFMT0}STT2 speed:", process_time() - start_time)
+        print(f"{STRFMT0}Train split: {self.train.shape}")
+        print(f"{STRFMT0}Test split: {self.test.shape}")
         return self
 
 
@@ -249,16 +290,8 @@ class Wrangler(object):
         """Combines text data args provided by arglist."""
         text = str()
         for arg in arglist:
-            text += arg
+            text += " " + arg
         return text
-
-    @staticmethod
-    def __crack_hs_code(pandas_df):
-        """Creates two additional columns by breaking down the HS4 code."""
-        df = pandas_df
-        df["hs2"] = df["hs4"][:2]
-        df["hs1"] = df["hs4"][0]
-        return df
 
     @staticmethod
     def __format_fulltext(fulltext_record):
@@ -272,35 +305,43 @@ class Wrangler(object):
         return " ".join([vec[1] for vec in vectors])
 
     @staticmethod
-    def clean_raw_text(pandas_df):
-        """Performs all standard cleaning methods."""
-        df = pandas_df.astype(str)
+    def crack_hs_code(pandas_df):
+        """Creates two additional columns by breaking down the HS4 code."""
+        df = pandas_df
+        df["hs2"] = df["hs4"].str[:2]
+        df["hs1"] = df["hs4"].str[0]
+        return df
 
-        # we can start by dropping duplicates records
-        df.drop_duplicates(subset='desc_id', keep=False, inplace=True)
+    @staticmethod
+    def format_raw_text(pandas_df):
+        """Performs all standard cleaning methods on the data.
 
-        # we need to first standardize the port cols & the shipper/consignee
-        # cols so the algorithm won't confuse them with other features.
-        # for example, a port_us record with value "New York" becomes: "port_us_NewYork"
+        Requirements: ['desc', 'ftdesc', 'port_us, 'port_og', 'ship', 'cons'] columns
+        """
+        df = pandas_df
+
+        # format the fulltext description
+        print(f"{STRFMT0}Format fulltext descriptions...")
+        df["ftdesc"] = df["ftdesc"].apply(Wrangler.__format_fulltext)
+
+        # we need to first standardize the ports/shipper/consignee cols
+        # for example, a shipper record with value "Crude Company Name" becomes: "ship_CrudeCompanyName"
+        print(f"{STRFMT0}Format extra text columns...")
         cols = ["port_us", "port_og", "ship", "cons"]
         df_cols = list()
         for col in cols:
             df[col] = Wrangler.__concat_text([col + "_", df[col].str.replace(" ", "")])
             df_cols.append(df[col])
 
-        # format the fulltext description
-        df["desc_ft"] = df["desc_ft"].apply(Wrangler.__format_fulltext)
-
-        # now we need to combine all text cols into the one true description plus (TM)
-        df_cols = [df[col] for col in df_cols]
-        df_cols.insert(0, df["desc_ft"])
-        df["descft+"] = Wrangler.__concat_text(df_cols)
+        # now we need to merge all formatted cols into ftdesc -> ftdesc+ and desc -> desc+
+        print(f"{STRFMT0}Creating desc+ and ftdesc+ columns...")
+        df_cols.insert(0, df["ftdesc"])
+        df["ftdesc+"] = Wrangler.__concat_text(df_cols)
         df_cols.pop(0)
         df_cols.insert(0, df["desc"])
         df["desc+"] = Wrangler.__concat_text(df_cols)
-        df = Wrangler.__crack_hs_code(df)
 
-        return df[["desc_id", "desc+", "descft+", "hs4", "hs2", "hs1"]]
+        return df
 
     @staticmethod
     def remove_raw_hs(pandas_df, desc_colname, hs4_colname="hs4", sdw_only=False):
@@ -316,7 +357,8 @@ class Wrangler(object):
         desc_nohs = pd.Series()
         for hs4 in set(df[hs4_colname]):
             hs4_pattern = re.compile(r"[^\d]" + hs4 + r"([^\d]|\d{2}[^\d]|\d{4}[^\d]|\d{6}[^\d])")
-            subset = df.query(hs4_colname + " == " + hs4)[desc_colname]
+            subset = df[df[hs4_colname == hs4]][desc_colname]
+            # subset = df.query(hs4_colname + f" == \'{hs4}\'")[desc_colname]
             subset = subset.str.replace(hs4_pattern, "")
             if sdw_only:
                 sdw_pattern = re.compile(r"[^\s\d\w]")
@@ -325,30 +367,34 @@ class Wrangler(object):
         return desc_nohs.sort_index().str.lower()
 
     @staticmethod
-    def unpack_results(results, base_colname):
+    def unpack_results(results, base_colname, cvals=False):
         """Unpack those pesky result lists!
 
         Args:
             results (pd.Series): size n x 1 where each record must be list with length 3
             base_colname (str): column name used as a prefix for the unpacked columns
+            cvals (bool): are these c values? if so, change the basename to reflect that.
         Returns: pd.DataFrame of size n x 3 with unpacked result vectors for rows
         """
-        buffer = results
+        if cvals:
+            base_colname += "c"
+        buffer = pd.DataFrame()
         buffer[[base_colname + "_3", base_colname + "_2", base_colname + "_1"]] = pd.DataFrame(
             results.to_list(), index=results.index
         )
         return buffer
 
     @staticmethod
-    def vectorize(xtrain, xtest, stopwords=None, ngrams=(2, 2), maxdf=0.50):
+    def vectorize(xtrain, xtest, stopwords=None, ngrams=(2, 2), maxdf=1.00):
         """Vectorize your training & testing data in one step with this handy method.
 
         Turns nx1 rows of text data into nxf array of features where f is the
         total number of features identified in the text data by the vectorizer.
 
-        Returned tfidf arrays have tfidf vectors as records which
+        Returns nxf np.array with tfidf vectors as records which
         can be used as input to our text classification algorithm.
         """
+        print(f"{STRFMT0}Transforming...")
         tfidf_vec = TfidfVectorizer(
             strip_accents='ascii', lowercase=True, preprocessor=None, analyzer='word',
             stop_words=stopwords,
@@ -359,8 +405,25 @@ class Wrangler(object):
         )
         train_tfidf = tfidf_vec.fit_transform(xtrain)
         test_tfidf = tfidf_vec.transform(xtest)
-
         return tfidf_vec, train_tfidf, test_tfidf
+
+    @staticmethod
+    def export_model(model, model_name):
+        print("Exporting model...")
+        export_path = f"/home/adam/text_class/models/{model_name}.joblib"
+        print(f"{STRFMT0}Compressing...")
+        joblib.dump(model, export_path, compress=1, protocol=4)
+        print(f"{STRFMT0}BayesNet object now persists at:\n\t{export_path}")
+        return model
+
+    @staticmethod
+    def load_model(model_path):
+        print("Loading model...")
+        model = joblib.load(filename=model_path)
+        if isinstance(model, BayesNet):
+            return model
+        else:
+            raise TypeError("The loaded joblib file does not evaluate to a BayesNet object.")
 
 
 class BayesNet(object):
@@ -377,147 +440,185 @@ class BayesNet(object):
 
     def __init__(self):
         self.graph = dict()
-        self.results = None
+        self.results = dict()
 
-    def train_node(self, xtrain, ytrain, xtest, ytest, nodename, stopwords=None, ngrams=(2, 2), maxdf=0.50):
-        # vectorize the training & testing xdata
+    def train_node(self, xtrain, ytrain, xtest, ytest, nodename, stopwords=None, ngrams=(2, 2), maxdf=1.0):
+        print("Training node:", nodename)
         tfidf_vec, train_tfidf, test_tfidf = Wrangler.vectorize(xtrain, xtest, stopwords, ngrams, maxdf)
         clf = ComplementNB(alpha=0.05, norm=False)
+        print(f"{STRFMT0}Learning...")
         clf.fit(train_tfidf, ytrain)
 
-        hspreds, hspreds_c = clf.predict(test_tfidf, return_n=3, return_all=True)
+        print(f"{STRFMT0}Predicting...")
+        hspreds, hspreds_c = clf.predict_top3(test_tfidf)
         acc = accuracy_score(ytest, hspreds[:, -1])
-        print("{} Node classification accuracy: {}".format(nodename, acc))
+        print(f"{STRFMT0}{nodename} node accuracy: {acc}")
 
-        hspreds = pd.Series(hspreds, index=ytest.index)
-        hspreds_c = pd.Series(hspreds_c, index=ytest.index)
+        hspreds = pd.Series(hspreds.tolist(), index=ytest.index)
+        hspreds_c = pd.Series(hspreds_c.tolist(), index=ytest.index)
 
-        self.graph["node_" + nodename] = {"vec": tfidf_vec, "clf": clf}
-        self.results["node_" + nodename] = {"acc": acc, "results": hspreds, "results_c": hspreds_c}
-        return self.results["node_" + nodename]
+        nodename = "node_" + nodename
+        self.graph[nodename] = {"vec": tfidf_vec, "clf": clf}
+        self.results[nodename] = {"acc": acc, "hspreds": hspreds, "hspreds_c": hspreds_c}
+        return self.results[nodename]
 
-    def train_layer(self, train_data, test_data, x_colname, y_colname):
+    def train_layer(self, train_data, test_data, desc_type, y_in_type, y_out_type):
+        print(f"Training layer with input: {desc_type}, predicting: {y_out_type}")
         # initialize data structures to hold results
         layer_results = pd.Series()
         layer_results_c = pd.Series()
         # loop through each y in the input set & train & node for each
-        for y in set(train_data[y_colname]):
-            query = y_colname + " == " + y
+        for y_in in set(train_data[y_in_type]):
+            train_subset = train_data[train_data[y_in_type] == y_in]
+            xtrain = train_subset[desc_type]
+            ytrain = train_subset[y_out_type]
 
-            xtrain = train_data.query(query)[x_colname]
-            ytrain = train_data.query(query)[y_colname]
+            test_subset = test_data[test_data[y_in_type] == y_in]
+            xtest = test_subset[desc_type]
+            ytest = test_subset[y_out_type]
 
-            xtest = test_data.query(query)[x_colname]
-            ytest = test_data.query(query)[y_colname]
-
-            node_results = self.train_node(xtrain, ytrain, xtest, ytest, nodename=y)
-            layer_results = layer_results.append(node_results[y]["hspreds"])
-            layer_results_c = layer_results_c.append(node_results[y]["hspreds_c"])
+            # node_results will be self.results[nodename]
+            node_results = self.train_node(
+                xtrain=xtrain,
+                ytrain=ytrain,
+                xtest=xtest,
+                ytest=ytest,
+                nodename=y_in,
+                stopwords=None,
+                ngrams=(2, 2),
+                maxdf=1.0
+            )
+            layer_results = layer_results.append(node_results["hspreds"])
+            layer_results_c = layer_results_c.append(node_results["hspreds_c"])
         # sort results by index
         layer_results.sort_index(inplace=True)
         layer_results_c.sort_index(inplace=True)
         # unpack results list into 3 cols, keeping track of the indices
         # our layer results will become n x 3 pd.DataFrames
-        layer_results = Wrangler.unpack_results(layer_results, y_colname)
-        layer_results_c = Wrangler.unpack_results(layer_results_c, y_colname)
-
-        acc = accuracy_score(test_data[y_colname], layer_results.iloc[:, -1])
-        print("{} Layer classification accuracy: {}".format(y_colname, acc))
+        print(f"Unpacking {y_out_type} results...")
+        layer_results = Wrangler.unpack_results(layer_results, y_out_type)
+        layer_results_c = Wrangler.unpack_results(layer_results_c, y_out_type, cvals=True)
+        acc = accuracy_score(test_data[y_out_type], layer_results.iloc[:, -1])
+        print(f"{STRFMT0}{y_out_type} layer accuracy: {acc}")
         # access specific results with relevant prefix, inner dict with keys: 'acc' | 'results' | 'results_c'
         # example layer level: BayesNet.results['layer_hs2']['acc']
         # example node level: BayesNet.results['node_39']['results']
-        self.results["layer_" + y_colname] = {"acc": acc, "results": layer_results, "results_c": layer_results_c}
-        return self.results["layer_" + y_colname]
+        self.results["layer_" + y_out_type] = {"acc": acc, "results": layer_results, "results_c": layer_results_c}
+        return self.results["layer_" + y_out_type]
 
-    def train_graph(self, train_data, test_data, input_type="desc+", root_y="hs1"):
-        # train root node (predicts hs1)
-        xtrain = train_data[input_type]
+    def train_graph(self, train_data, test_data, desc_type="desc+", root_y="hs1"):
+        print("Training graph with input type:", desc_type)
+        # train root node (predicts hs1 from xdata)
+        xtrain = train_data[desc_type]
         ytrain = train_data[root_y]
-        xtest = test_data[input_type]
+        xtest = test_data[desc_type]
         ytest = test_data[root_y]
         self.train_node(xtrain, ytrain, xtest, ytest, nodename="root")
 
-        # train layer 1 (predicts hs2)
-        self.train_layer(train_data, test_data, input_type, "hs2")
+        # train layer 1 (predicts hs2 from hs1)
+        self.train_layer(train_data, test_data, desc_type, y_in_type="hs1", y_out_type="hs2")
 
-        # train layer 2 (predicts hs4)
-        self.train_layer(train_data, test_data, input_type, "hs4")
+        # train layer 2 (predicts hs4 from hs2)
+        self.train_layer(train_data, test_data, desc_type, y_in_type="hs2", y_out_type="hs4")
 
         return self
 
-    def execute_root(self, xdf):
+    def execute_root(self, data, desc_type, class_type="hs1"):
         """Basic method that executes the graph's root node.
 
         Args:
-            xdf (pd.DataFrame): contains 'xdata' col with raw xdata
-        Returns: tuple(np.array[class3, class2, class1], np.array[cvalue3, cvalue3, cvalue1])
+            data (pd.DataFrame): contains clean description column
+            desc_type (str): column with the xdata to classify
+            class_type (str): this is the class_type that root is predicting
+ 
+        Returns: tuple(pd.Series[class3, class2, class1], 
+                       pd.Series[cvalue3, cvalue3, cvalue1])
         """
-        x_tfidf = self.graph["node_root"]["vec"].transform(xdf["xdata"])
-        root_results, root_results_c = self.graph["node_root"]["clf"].predict(x_tfidf)
+        print(f"{STRFMT0}Executing root node!")
+        x_tfidf = self.graph["node_root"]["vec"].transform(data[desc_type])
+        root_results, root_results_c = self.graph["node_root"]["clf"].predict_top3(x_tfidf)
+        root_results = pd.Series(root_results.tolist(), index=data.index)
+        root_results_c = pd.Series(root_results_c.tolist(), index=data.index)
+
+        print(f"{STRFMT0}Unpacking root node results...")
+        root_results = Wrangler.unpack_results(root_results, class_type)
+        root_results_c = Wrangler.unpack_results(root_results_c, class_type, cvals=True)
+
         return root_results, root_results_c
 
-    def execute_layer(self, xdf, input_colname):
+    def execute_layer(self, data, desc_type, y_in_type, y_out_type):
+        print(f"{STRFMT0}Using {y_in_type} results to predict {y_out_type}!")
         layer_results = pd.Series()
         layer_results_c = pd.Series()
-        for nodename in set(xdf[input_colname]):
-            query = input_colname + " == " + nodename
-            subset = xdf.query(query)["xdata"]
+        for nodename in set(data[y_in_type]):
+            subset = data[data[y_in_type] == nodename]
+            x_subset = subset[desc_type]
+
             node = self.graph["node_" + nodename]
-            x_tfidf = node["vec"].transform(subset)
-            node_results, node_results_c = node["clf"].predict(x_tfidf)
-            layer_results.append(node_results)
-            layer_results_c.append(node_results_c)
+            x_tfidf = node["vec"].transform(x_subset)
+            node_results, node_results_c = node["clf"].predict_top3(x_tfidf)
+
+            node_results = pd.Series(node_results.tolist(), index=x_subset.index)
+            node_results_c = pd.Series(node_results_c.tolist(), index=x_subset.index)
+
+            layer_results = layer_results.append(node_results)
+            layer_results_c = layer_results_c.append(node_results_c)
 
         layer_results.sort_index(inplace=True)
         layer_results_c.sort_index(inplace=True)
+        print(f"{STRFMT0}Unpacking {y_out_type} results...")
+        layer_results = Wrangler.unpack_results(layer_results, y_out_type)
+        layer_results_c = Wrangler.unpack_results(layer_results_c, y_out_type, cvals=True)
+
         return layer_results, layer_results_c
 
-    def execute_graph(self, xdata):
-        # format data to receive results
-        xdf = pd.DataFrame(xdata, columns=["xdata"])
-        del xdata
-
+    def execute_graph(self, data, desc_type="desc+", test=False):
+        print("Directing graph...")
         # EXECUTE ROOT NODE
-        root_results, root_results_c = self.execute_root(xdf)
-        # unpack results into dataframes
-        root_results = Wrangler.unpack_results(root_results, "hs1")
-        root_results_c = Wrangler.unpack_results(root_results_c, "hs1_c")
-        # join dataframes
-        xdf = xdf.join([root_results, root_results_c], how="left")
+        root_results, root_results_c = self.execute_root(data, desc_type)
+        root_results = root_results.join(root_results_c, how="left")
+        data = data.join(root_results, how="left")
 
         # EXECUTE LAYER 1
-        layer_results1, layer_results1_c = self.execute_layer(xdf, input_colname="hs1_1")
-        layer_results1 = Wrangler.unpack_results(layer_results1, "hs2")
-        layer_results1_c = Wrangler.unpack_results(layer_results1_c, "hs2_c")
-        xdf = xdf.join([layer_results1, layer_results1_c], how="left")
+        layer_results1, layer_results1_c = self.execute_layer(data, desc_type, y_in_type="hs1_1", y_out_type="hs2")
+        layer_results1 = layer_results1.join(layer_results1_c, how="left")
+        data = data.join(layer_results1, how="left")
 
         # EXECUTE LAYER 2
-        layer_results2, layer_results2_c = self.execute_layer(xdf, input_colname="hs2_1")
-        layer_results2 = Wrangler.unpack_results(layer_results2, "hs4")
-        layer_results2_c = Wrangler.unpack_results(layer_results2_c, "hs4_c")
-        xdf = xdf.join([layer_results2, layer_results2_c], how="left")
+        layer_results2, layer_results2_c = self.execute_layer(data, desc_type, y_in_type="hs2_1", y_out_type="hs4")
+        layer_results2 = layer_results2.join(layer_results2_c, how="left")
+        data = data.join(layer_results2, how="left")
 
-        return xdf
+        if test:
+            acc = accuracy_score(data["hs1"], data["hs1_1"])
+            print("HS1 accuracy:", acc)
+            acc = accuracy_score(data["hs2"], data["hs2_1"])
+            print("HS2 accuracy:", acc)
+            acc = accuracy_score(data["hs4"], data["hs4_1"])
+            print("HS4 accuracy:", acc)
+            print("Exporting data...")
+            data.to_csv("/home/adam/text_class/data/livedata_results.csv")
+
+        return data
+
+
+def traintest():
+    # samplepct = 0.10
+    # data = LiveData().build_sampling_table(sample_pct=samplepct)
+    data = LiveData().read_csv("/home/adam/pycharm_remote/branches/traindata_10.csv")
+
+    data.clean_for_training()
+    data.strat_train_test2(train_pct=0.70)
+    model = BayesNet().train_graph(data.train, data.test, desc_type="desc+", root_y="hs1")
+    model.execute_graph(data.test, "desc+", test=True)
+
+    modelname = "cnbv3-0-10"
+    Wrangler.export_model(model, modelname)
+    return model
 
 
 def main():
-    # activate data object
-    server_cursor_name = "adam_cnb_dev"
-    print("Server cursor name:", server_cursor_name)
-    data = LiveData.connect(server_cursor_name)
-
-    # data.build_sampling_table(sample_pct=0.25)
-    data.sample_from_db()
-
-    data.clean()
-    data.stratified_train_test_split(train_pct=0.50)
-    model = BayesNet()
-    model.train_graph(data.train, data.test, input_type="desc+", root_y="hs1")
-
-    # predict for live data
-    # data.query_latest_data(totalobs=1000)
-    # model.execute_graph(data.df)
-
+    traintest()
     return None
 
 
